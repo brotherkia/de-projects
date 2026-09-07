@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Generated sample/local data -- regenerate with generate_sample_data.py
+*.db
+*.sqlite3
+
+# Scraper output
+*.csv
+
+# Real credentials never belong in the repo (docker-compose.yml holds placeholders only)
+.env
+*.local.yml
+
+# Airflow local runtime
+logs/
+airflow.cfg
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
