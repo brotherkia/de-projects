@@ -1,0 +1,14 @@
+# For running scripts/ and the tests directly on your machine, outside Docker.
+# The Airflow containers do NOT use this file -- the apache/airflow:3.3.1 image
+# already ships pandas 3.0.5, pyarrow 25.0.0 and psycopg2 2.9.12, which is why
+# there's no Dockerfile here.
+#
+#   python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+#
+# Unpinned on purpose: verified on pandas 3.0.5 (the same version Airflow 3.3.1
+# pins), and old pinned wheels won't build on current Python anyway.
+pandas
+
+# Only needed if you run the DAG's staging step outside Docker; the tests don't
+# require it.
+pyarrow

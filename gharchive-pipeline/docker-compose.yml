@@ -14,8 +14,15 @@
 # deployment they'd be different servers entirely.
 #
 # Start:  docker compose up -d
-# UI:     http://localhost:8081   (admin / admin)
+# UI:     http://localhost:8080   (admin / admin)
 # Query:  docker compose exec analytics-db psql -U analytics -d analytics
+#
+# Ports are overridable, because "8080 is free" is a fact about one machine and
+# not about the next one. If either is taken, copy .env.example to .env and
+# change it there -- compose reads .env automatically, and .env is gitignored
+# so your local choice never becomes everyone's default:
+#   AIRFLOW_PORT=8081
+#   ANALYTICS_DB_PORT=5433
 
 x-airflow-common: &airflow-common
   image: apache/airflow:3.3.1
@@ -71,7 +78,7 @@ services:
       POSTGRES_DB: analytics
     ports:
       # Exposed so you can point DBeaver/psql at it from the host.
-      - "5433:5432"
+      - "${ANALYTICS_DB_PORT:-5432}:5432"
     volumes:
       - analytics-db-data:/var/lib/postgresql/data
     healthcheck:
@@ -104,9 +111,8 @@ services:
     <<: *airflow-common
     command: api-server
     ports:
-      # 8081 on the host because another container already owns 8080.
-      # Inside the compose network everything still talks to port 8080.
-      - "8081:8080"
+      # Host port only. Inside the compose network this is always 8080.
+      - "${AIRFLOW_PORT:-8080}:8080"
     healthcheck:
       test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/monitor/health"]
       interval: 15s

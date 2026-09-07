@@ -51,9 +51,19 @@ problem, never a "does the maths work" problem.
 
 ## Run it
 
+On a machine that has never seen this repo, from the repo root:
+
 ```bash
+./setup.sh          # checks prerequisites, makes .venv, runs the 19 checks
+```
+
+Then bring up Airflow:
+
+```bash
+cd gharchive-pipeline
+cp .env.example .env      # only if host port 8080 or 5432 is already taken
 docker compose up -d
-# UI at http://localhost:8081  (admin / admin)  -- 8081, not 8080
+# UI at http://localhost:8080  (admin / admin)
 ```
 
 Then either unpause `gharchive_hourly` in the UI to let it backfill hour by

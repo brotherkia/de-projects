@@ -1,6 +1,19 @@
 # Handoff: data-engineering learning track
 
-Context for picking this repo up in a new session.
+Context for picking this repo up in a new session, on any machine.
+
+## Start here on a new machine
+
+```bash
+git clone https://hamgit.ir/kiaee7/de-projects.git DE && cd DE && ./setup.sh
+```
+
+`setup.sh` checks prerequisites, builds `.venv`, and runs the 19-check test
+suite so you know the logic works there before Docker is involved. Then see
+`gharchive-pipeline/README.md` to bring up Airflow.
+
+Nothing else is needed: the repo carries no data (the pipeline re-downloads
+what it needs) and no secrets beyond local-only Airflow keys.
 
 ## Who / why
 
@@ -21,7 +34,9 @@ this work; it doesn't have the volume to make a pipeline meaningful.
   time out entirely from here. GH Archive, Wikimedia EventStreams and dumps,
   NYC TLC, Open-Meteo, OpenSky, CoinGecko, api.github.com, huggingface.co and
   archive.org all work. Test reachability before designing around a source.
-- Host port **8080 is taken** by the `cute-site` container; Airflow uses 8081.
+- On *this* machine host port **8080 is taken** by the `cute-site` container,
+  so `.env` here sets `AIRFLOW_PORT=8081`. `.env` is gitignored precisely
+  because that is a fact about one machine; compose defaults to 8080.
 - Local Python is 3.14, so old pinned wheels (e.g. pandas 2.1.4) won't install.
   The venv at `.venv/` has pandas 3.0.5 — the same version Airflow 3.3.1 pins.
 - Docker works fine: 20 CPUs, ~6 GB RAM free.
