@@ -25,3 +25,7 @@ airflow.cfg
 Thumbs.db
 .vscode/
 .idea/
+
+# Downloaded GH Archive files and local pipeline output
+gharchive-pipeline/scripts/data/
+*.parquet
