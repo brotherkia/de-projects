@@ -16,6 +16,7 @@ from airflow.operators.python import PythonOperator
 sys.path.append("/opt/airflow/scripts")
 
 from pipeline_functions import (  # noqa: E402
+    df_from_json,
     extract_answers,
     get_connection,
     load_dataframe,
@@ -43,27 +44,21 @@ def _extract(**context):
 
 
 def _transform_subject_performance(**context):
-    import pandas as pd
-
-    df = pd.read_json(context["ti"].xcom_pull(key="raw_answers", task_ids="extract_answers"))
+    df = df_from_json(context["ti"].xcom_pull(key="raw_answers", task_ids="extract_answers"))
     result = transform_subject_performance(df)
     context["ti"].xcom_push(key="subject_performance", value=result.to_json())
 
 
 def _transform_question_difficulty(**context):
-    import pandas as pd
-
-    df = pd.read_json(context["ti"].xcom_pull(key="raw_answers", task_ids="extract_answers"))
+    df = df_from_json(context["ti"].xcom_pull(key="raw_answers", task_ids="extract_answers"))
     result = transform_question_difficulty(df)
     context["ti"].xcom_push(key="question_difficulty", value=result.to_json())
 
 
 def _load(**context):
-    import pandas as pd
-
     ti = context["ti"]
-    subject_perf = pd.read_json(ti.xcom_pull(key="subject_performance", task_ids="transform_subject_performance"))
-    question_diff = pd.read_json(ti.xcom_pull(key="question_difficulty", task_ids="transform_question_difficulty"))
+    subject_perf = df_from_json(ti.xcom_pull(key="subject_performance", task_ids="transform_subject_performance"))
+    question_diff = df_from_json(ti.xcom_pull(key="question_difficulty", task_ids="transform_question_difficulty"))
 
     conn = get_connection()
     try:

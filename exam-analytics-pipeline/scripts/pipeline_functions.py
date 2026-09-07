@@ -5,10 +5,30 @@ Written against plain DB-API connections (sqlite3 locally, psycopg2 against
 the real Postgres DB) so the exact same functions run in both places —
 only get_connection() changes between environments.
 """
+import io
 import os
 import sqlite3
 
 import pandas as pd
+
+# ---------------------------------------------------------------------------
+# Serialization (used by the Airflow DAG to pass DataFrames through XCom)
+# ---------------------------------------------------------------------------
+
+def df_from_json(payload: str) -> pd.DataFrame:
+    """
+    Rebuild a DataFrame from a DataFrame.to_json() string.
+
+    pandas 3 removed passing a JSON *string* straight to read_json() -- a bare
+    string is now read as a file path, so the old call died with
+    FileNotFoundError. StringIO is explicit about "this is data, not a path"
+    and works on pandas 2 and 3 alike.
+
+    Lives here rather than in the DAG so it can be tested without Airflow
+    installed -- same reason event_processing.py has no Kafka import.
+    """
+    return pd.read_json(io.StringIO(payload))
+
 
 # ---------------------------------------------------------------------------
 # Connection

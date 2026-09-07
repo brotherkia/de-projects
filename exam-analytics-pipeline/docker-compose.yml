@@ -5,7 +5,9 @@ x-airflow-common: &airflow-common
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-db/airflow
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
-    _PIP_ADDITIONAL_REQUIREMENTS: pandas psycopg2-binary
+    # pandas pinned to Airflow 2.9.3's own constraint -- unpinned, pip pulls
+    # pandas 3, which breaks both Airflow's deps and read_json-style APIs.
+    _PIP_ADDITIONAL_REQUIREMENTS: pandas==2.1.4 psycopg2-binary
     # --- Point this at your REAL exam-system Postgres DB (not airflow-db above) ---
     PIPELINE_DB_HOST: host.docker.internal
     PIPELINE_DB_NAME: your_django_db_name
