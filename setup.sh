@@ -52,7 +52,21 @@ fi
 .venv/bin/pip install --quiet -r gharchive-pipeline/requirements.txt
 ok "installed: $(.venv/bin/python -c 'import pandas; print("pandas " + pandas.__version__)')"
 
-say "3. Running the standalone test suite"
+say "3. Generating gharchive-pipeline/.env"
+
+ENV_FILE="$ROOT/gharchive-pipeline/.env"
+if [ -f "$ENV_FILE" ]; then
+  ok ".env already exists, leaving it alone"
+else
+  gen() { python3 -c 'import base64,os;print(base64.urlsafe_b64encode(os.urandom(32)).decode())'; }
+  sed -e "s|^AIRFLOW__CORE__FERNET_KEY=$|AIRFLOW__CORE__FERNET_KEY=$(gen)|" \
+      -e "s|^AIRFLOW__API_AUTH__JWT_SECRET=$|AIRFLOW__API_AUTH__JWT_SECRET=$(gen)|" \
+      "$ROOT/gharchive-pipeline/.env.example" > "$ENV_FILE"
+  chmod 600 "$ENV_FILE"
+  ok "wrote .env with freshly generated secrets (gitignored)"
+fi
+
+say "4. Running the standalone test suite"
 echo "  (first run downloads one ~73 MB hour from GH Archive; later runs reuse it)"
 echo
 
@@ -64,7 +78,6 @@ if "$ROOT/.venv/bin/python" test_gharchive.py; then
 The pipeline logic is verified on this machine. To bring up Airflow:
 
   cd gharchive-pipeline
-  cp .env.example .env        # only if port 8080 or 5432 is taken here
   docker compose up -d
   docker compose ps           # wait for apiserver to report healthy
 

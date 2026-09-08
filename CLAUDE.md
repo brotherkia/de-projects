@@ -76,6 +76,11 @@ Host ports come from `.env` (gitignored, see `.env.example`); compose defaults
 to 8080/5432. On Parsa's main machine 8080 is taken by an unrelated
 `cute-site` container, so `.env` there sets 8081/5433. Don't hardcode either.
 
+`.env` also carries the Airflow secrets (`AIRFLOW__CORE__FERNET_KEY`,
+`AIRFLOW__API_AUTH__JWT_SECRET`). Compose refuses to start without them, and
+`./setup.sh` generates them on first run. Never commit a real value — this repo
+is public, and its history was rewritten once already to remove a pair.
+
 ## Git
 
 Remote is **hamgit.ir** (`kiaee7`), credentials already stored. GitHub is

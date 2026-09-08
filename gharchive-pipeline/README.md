@@ -61,7 +61,7 @@ Then bring up Airflow:
 
 ```bash
 cd gharchive-pipeline
-cp .env.example .env      # only if host port 8080 or 5432 is already taken
+cp .env.example .env      # then fill in the two secrets it lists
 docker compose up -d
 # UI at http://localhost:8080  (admin / admin)
 ```
