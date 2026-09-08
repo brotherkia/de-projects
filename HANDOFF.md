@@ -5,7 +5,7 @@ Context for picking this repo up in a new session, on any machine.
 ## Start here on a new machine
 
 ```bash
-git clone https://hamgit.ir/kiaee7/de-projects.git DE && cd DE && ./setup.sh
+git clone https://github.com/brotherkia/de-projects.git DE && cd DE && ./setup.sh
 ```
 
 `setup.sh` checks prerequisites, builds `.venv`, and runs the 19-check test
@@ -13,7 +13,9 @@ suite so you know the logic works there before Docker is involved. Then see
 `gharchive-pipeline/README.md` to bring up Airflow.
 
 Nothing else is needed: the repo carries no data (the pipeline re-downloads
-what it needs) and no secrets beyond local-only Airflow keys.
+what it needs) and no secrets at all. `setup.sh` generates the two Airflow
+secrets into `gharchive-pipeline/.env`, which is gitignored; compose refuses
+to start without them.
 
 ## Who / why
 
@@ -28,15 +30,27 @@ this work; it doesn't have the volume to make a pipeline meaningful.
 
 ## Environment facts that cost time to rediscover
 
-- Git host is **hamgit.ir** (`kiaee7`), credentials already stored. GitHub is
-  reachable but the local SSH key is not registered there.
+- Git host for **this** repo is **GitHub** (`brotherkia/de-projects`, public),
+  over HTTPS. `gh` lives at `~/.local/bin/gh` and is wired in as git's
+  credential helper for github.com, so push just works; there is no SSH key.
+  `cute-site` and `online-exam` still live on **hamgit.ir** (`kiaee7`) and
+  still use the token in `~/.git-credentials` — don't delete that file.
+- **TLS interception happens on this network.** Mid-session, github.com *and*
+  hamgit.ir both started presenting certs issued by `CN=MTNISubCA01`
+  (MTN Irancell) instead of their real CAs, and every HTTPS git operation
+  failed verification. It cleared on its own. Never "fix" that by disabling
+  `http.sslVerify` — that hands your token to whoever runs the proxy. Wait it
+  out, or use a VPN.
 - **Network filtering matters.** `books.toscrape.com` and `api.binance.com`
   time out entirely from here. GH Archive, Wikimedia EventStreams and dumps,
   NYC TLC, Open-Meteo, OpenSky, CoinGecko, api.github.com, huggingface.co and
   archive.org all work. Test reachability before designing around a source.
-- On *this* machine host port **8080 is taken** by the `cute-site` container,
-  so `.env` here sets `AIRFLOW_PORT=8081`. `.env` is gitignored precisely
-  because that is a fact about one machine; compose defaults to 8080.
+- On *this* machine host ports **8080 and 5432 are both taken** — 5432 by
+  `online-exam-db-1` — so `.env` here sets `AIRFLOW_PORT=8081` and
+  `ANALYTICS_DB_PORT=5433`, putting the UI on **localhost:8081**. Compose
+  defaults to 8080/5432, which will fail to bind here. `.env` is gitignored
+  because that is a fact about one machine — and because it also holds the
+  two Airflow secrets.
 - Local Python is 3.14, so old pinned wheels (e.g. pandas 2.1.4) won't install.
   The venv at `.venv/` has pandas 3.0.5 — the same version Airflow 3.3.1 pins.
 - Docker works fine: 20 CPUs, ~6 GB RAM free.
@@ -53,6 +67,20 @@ Postgres, and 19/19 standalone logic checks.
 layer; raw files sit in a Docker volume rather than MinIO.
 
 ## History worth knowing
+
+**This repo moved from hamgit.ir to GitHub, and its history was rewritten on
+the way.** `docker-compose.yml` had a real Fernet key and JWT secret committed
+as literal values; publishing publicly would have made them permanent. The
+three affected commits were rewritten, so those two values appear nowhere in
+GitHub's history, and compose now reads both from `.env`. Consequence to know
+about: the three commits from `gharchive-pipeline` onward have **different
+hashes** than the ones still on hamgit.
+
+hamgit.ir/kiaee7/de-projects still exists, untouched, with the original
+secret-bearing history — a force-push there was rejected because `main` is a
+protected branch. **Treat both old keys as burned.** If either was ever used
+against an Airflow instance holding real connection credentials, rotate those
+credentials: the Fernet key is what decrypts them.
 
 Two earlier starter projects were deleted at commit `cb99250` and remain in
 history at `e767346`:
