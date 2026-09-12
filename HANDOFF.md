@@ -53,18 +53,43 @@ this work; it doesn't have the volume to make a pipeline meaningful.
   two Airflow secrets.
 - Local Python is 3.14, so old pinned wheels (e.g. pandas 2.1.4) won't install.
   The venv at `.venv/` has pandas 3.0.5 — the same version Airflow 3.3.1 pins.
+  **If `python3 -m venv` is interrupted it leaves a venv with no `pip` and an
+  empty `site-packages`.** That happened here and made the test suite look
+  broken on a machine where it had previously passed. `rm -rf .venv` and re-run
+  `./setup.sh` rather than debugging imports.
+- Docker Hub pulls work. **`docker manifest inspect` fails with a CloudFront 403
+  regardless**, which looks exactly like a geo-block and is not one — it is an
+  auth quirk of that subcommand. Test image availability with a real `docker
+  pull`, never with `manifest inspect`.
+- The Airflow services carry `restart: always`; the two Postgres containers do
+  not. After a host reboot the stack comes back **half-up** — scheduler running,
+  databases down. `docker compose up -d` fixes it.
 - Docker works fine: 20 CPUs, ~6 GB RAM free.
 
 ## Current project: `gharchive-pipeline/`
 
 Airflow 3.3.1 hourly ETL over GH Archive. See its README for detail.
 
-**Verified, actually run:** `docker compose up -d` with all services healthy,
-one full DAG run to `state=success` loading 114,005 events / 44,924 repos into
-Postgres, and 19/19 standalone logic checks.
+**Verified, actually run:** `docker compose up -d` with all services healthy;
+a continuous **140-hour backfill** (2026-09-06-12 → 2026-09-12-07) of **142 runs,
+0 failed**, loading **9,771,985 events** and 3,883,472 repo-hour rows over
+1,730,954 distinct repos; 4.8 GB of raw archive on disk; **27/27** standalone
+logic checks; and `migrations/001_pad_event_hour.sql` applied and verified.
 
-**Not yet done:** never left running to backfill continuously; no streaming
-layer; raw files sit in a Docker volume rather than MinIO.
+**Not yet done:** no streaming layer — Kafka reconciliation is the next build.
+Raw files still sit in a Docker volume rather than MinIO. **There is no Spark in
+this project** and none is planned; if a resume ever says otherwise, it is wrong.
+
+**Two bugs found and fixed during that backfill**, both documented in the
+pipeline README:
+
+- a silently truncated download (19,101 bytes short of `content-length`) that
+  was promoted to final and then cached, so retries could never win — it wedged
+  the whole backfill behind one hour
+- `event_hour` stored in the archive's unpadded URL format, which sorts
+  `0,1,10,...,19,2,20`, making `max(event_hour)` report hour 9 as the latest
+  hour of a complete day. Equality was unaffected, so idempotency held and the
+  bug hid for 40+ hours.
 
 ## History worth knowing
 

@@ -15,14 +15,21 @@ two analytics tables in Postgres:
 
 - `docker compose up -d` brings up Airflow 3.3.1 (LocalExecutor) + two Postgres
   instances. All services report healthy.
-- A full DAG run completed against real data: `airflow dags test
-  gharchive_hourly 2026-09-06T12:00:00+00:00` → `state=success`, loading
-  **114,005 events across 44,924 repos** into Postgres.
-- `scripts/test_gharchive.py` → **19/19 checks pass**, no Airflow or containers
+- **A continuous 140-hour backfill completed.** The DAG was unpaused and the
+  scheduler worked from 2026-09-06-12 to 2026-09-12-07 one hour at a time —
+  **142 runs, 0 failed**, serialized by `max_active_runs=1`. It loaded
+  **9,771,985 events** and **3,883,472 repo-hour rows** covering 1,730,954
+  distinct repos. Raw archive on disk: 4.8 GB.
+- `scripts/test_gharchive.py` → **27/27 checks pass**, no Airflow or containers
   needed.
+- `migrations/001_pad_event_hour.sql` applied to the analytics DB. Verified
+  after: 0 unpadded keys, `max(event_hour)` agrees with the true chronological
+  max, distinct keys == distinct real hours (nothing duplicated across the two
+  key formats), and per-hour event counts unchanged — no double-counting.
 
-**Not yet done:** the scheduler has only run one hour on demand — the DAG has
-not been unpaused to backfill continuously; no streaming layer yet.
+**Not yet done:** no streaming layer yet — Kafka reconciliation is the next
+step. Raw files still sit in a Docker volume rather than MinIO. There is no
+Spark in this project and none is planned for now.
 
 ## Why this data source
 
@@ -42,7 +49,8 @@ toy setting here, it's the whole point.
 docker-compose.yml            Airflow 3.3.1 LocalExecutor + airflow-db + analytics-db
 dags/gharchive_hourly.py      the DAG -- scheduling, retries, skip-on-missing only
 scripts/gharchive.py          all real logic; zero Airflow imports
-scripts/test_gharchive.py     19 checks, runs standalone
+scripts/test_gharchive.py     27 checks, runs standalone
+migrations/*.sql              schema changes to the analytics DB, applied by hand
 ```
 
 `scripts/` has no Airflow dependency on purpose: the extract/transform/load
@@ -83,7 +91,7 @@ Test the logic with no containers at all:
 cd scripts && python3 test_gharchive.py
 ```
 
-## Four real problems this data forced
+## Six real problems this data forced
 
 None of these were invented for the exercise — each was hit while building.
 
@@ -109,6 +117,36 @@ derived from it looks completely reasonable and is wrong by half.
 That's the failure mode neither a 404 check nor a JSON-validity check catches,
 and it's why `completeness_warnings()` exists. Silent partial data is worse
 than an outage, because nothing alerts.
+
+**5. A silently truncated download that retries could never fix.** The backfill
+wedged on `2026-09-08-6`. The file arrived as 15,068,496 bytes against a declared
+`content-length` of 15,087,597 — 19,101 short, 0.13% — and every `aggregate`
+retry died on `EOFError: Compressed file ended before the end-of-stream marker`.
+
+A cut connection and a finished response are indistinguishable to the read loop:
+both end with `read()` returning `b''`. So the loop exited normally and
+`os.replace()` promoted a truncated file to its final name. The `size > 0` cache
+check then served that corpse to every retry, so retrying could never win — and
+`max_active_runs=1` queued the whole backfill behind one 19 KB shortfall.
+`download_hour()` now compares bytes written against `content-length` *before*
+the rename, and raises `IncompleteDownload` rather than promoting a short file.
+
+Worth recording: adding retry backoff first made this **worse**, stretching the
+wedge from ~4 minutes to ~44. Backoff is the right answer for a transient
+network fault and the wrong answer for a poisoned cache.
+
+**6. The archive's URL format is not a sort order.** `event_hour` was stored in
+GH Archive's own naming, where the hour is not zero-padded. Correct for the URL —
+padding it 404s, see problem 3 — but as a TEXT primary key it sorts
+`0, 1, 10, 11, … 19, 2, 20`. On any complete day the lexicographic max of hours
+0..23 is `9`, so `max(event_hour)`, the obvious watermark query, reported 09:00
+as the newest hour of a day running to 23:00.
+
+Equality was never affected, which is why it hid for 40+ loaded hours: the loads
+match with `WHERE event_hour = %s`, so idempotency held the whole time while
+`ORDER BY` quietly lied. `hour_partition()` now supplies the padded storage key,
+`hour_key()` is restricted to URLs and raw filenames, and
+`migrations/001_pad_event_hour.sql` rewrites the rows already loaded.
 
 ## Design decisions worth defending
 
@@ -139,8 +177,31 @@ later still process the hour it was created for.
 
 ## Next
 
-- Unpause and let it backfill a full day, watching `max_active_runs=1` serialize it
 - Kafka layer: replay an hour's events through a topic and reconcile the
-  streaming aggregates against these batch tables — they must agree exactly
+  streaming aggregates against these batch tables — they must agree exactly.
+  This is the idea carried forward from the deleted `exam-analytics-pipeline`,
+  and it is the next thing to build.
 - Move raw files to MinIO instead of a Docker volume
 - DuckDB or ClickHouse for the analytics store, and compare query time
+
+## A data-quality result worth keeping
+
+Of the 140 hours backfilled, **25 arrived degraded** — 18% of a six-day window.
+Every one of them is missing exactly the same three event types:
+
+```
+PushEvent, CreateEvent, DeleteEvent
+```
+
+That is the identical signature as `2026-09-05-10` (problem 4 above), so this is
+a systematic upstream failure mode rather than random loss. Volumes in those
+hours collapse from ~70–116k events to ~5–18k.
+
+It is upstream, not a bug here, and that was checked rather than assumed: local
+file sizes match the server's `content-length` byte for byte, every file passes
+`gzip -t`, and raw line counts match loaded events exactly (87,562 lines →
+87,563 rows; the +1 is the trailing newline). The pipeline loads precisely what
+was published.
+
+`completeness_warnings()` flagged all 25 unaided. It was written against a
+sample of one; it has now proven itself on 25 more.
