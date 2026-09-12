@@ -215,6 +215,33 @@ def is_usable(event: dict) -> bool:
     return bool(repo.get("name")) and bool(actor.get("login"))
 
 
+def is_merged_pr(event_type: str, payload: dict, pr: dict) -> bool:
+    """
+    Did this PullRequestEvent represent a merge?
+
+    Measured on 2026-09-12-06: of 19,539 PullRequestEvents, `action` was
+    'merged' 6,422 times -- and `pull_request.merged` was None on ALL 19,539.
+    The original `bool(pr.get("merged"))` therefore returned False every single
+    time, which is why prs_merged was 0 across all 140 backfilled hours and
+    3,883,472 rows while prs_opened was 576,746.
+
+    A metric that is always zero looks like a quiet feature rather than a bug,
+    which is exactly why it survived a full backfill unnoticed. Nothing errors,
+    nothing is missing, the column is just wrong.
+
+    Both forms are accepted because the archive spans a decade: GitHub's webhook
+    historically reported a merge as action='closed' with pull_request.merged
+    true, while the rows here carry action='merged' outright. Old hours would
+    silently read as zero again if only the new shape were handled.
+    """
+    if event_type != "PullRequestEvent":
+        return False
+    action = payload.get("action")
+    if action == "merged":
+        return True
+    return action == "closed" and bool(pr.get("merged"))
+
+
 def read_hour_frame(path: str) -> tuple:
     """
     Read one hour file into a flat DataFrame of just the columns we aggregate.
@@ -241,7 +268,7 @@ def read_hour_frame(path: str) -> tuple:
                 # closed, whether it was actually merged -- that distinction is
                 # what separates "PR throughput" from "PR churn".
                 "pr_action": payload.get("action") if event["type"] == "PullRequestEvent" else None,
-                "pr_merged": bool(pr.get("merged")) if event["type"] == "PullRequestEvent" else False,
+                "pr_merged": is_merged_pr(event["type"], payload, pr),
             }
         )
     return pd.DataFrame(rows), stats

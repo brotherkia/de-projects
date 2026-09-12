@@ -145,8 +145,50 @@ services:
       airflow-init:
         condition: service_completed_successfully
 
+  # Single-broker Kafka in KRaft mode -- no Zookeeper. One broker is the right
+  # size here: the point of this service is to prove that a streaming path
+  # produces the SAME aggregates as the batch tables, and a second broker adds
+  # replication mechanics without adding anything to that proof.
+  #
+  # Two listeners, which is the part worth understanding:
+  #   PLAINTEXT      kafka:9092        for clients inside the compose network
+  #   PLAINTEXT_HOST localhost:29092   for scripts run from the host venv
+  # A broker advertises the address clients should call back on. Advertise only
+  # the internal name and host clients connect once, then get handed "kafka:9092"
+  # and hang; advertise only localhost and in-network clients break the same way.
+  kafka:
+    image: apache/kafka:3.9.0
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,PLAINTEXT_HOST://:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:${KAFKA_PORT:-29092}
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      # All three default to 3 and would leave every internal topic stuck
+      # under-replicated on a one-broker cluster.
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      # Don't make a solo consumer wait out the default 3s rebalance window.
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      CLUSTER_ID: gharchive-local-cluster
+    ports:
+      - "${KAFKA_PORT:-29092}:29092"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 30s
+
 volumes:
   airflow-db-data:
   analytics-db-data:
   airflow-logs:
   gh-data:
+  kafka-data:

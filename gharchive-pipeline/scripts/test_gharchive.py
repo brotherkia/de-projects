@@ -37,6 +37,7 @@ from gharchive import (
     ensure_schema,
     hour_key,
     hour_partition,
+    is_merged_pr,
     is_usable,
     load_partition,
     read_hour_frame,
@@ -97,6 +98,33 @@ def test_hour_key_format():
           hour_key(datetime(2026, 1, 2, 0, tzinfo=timezone.utc)) == "2026-01-02-0")
 
 
+def test_merged_pr_detection():
+    """
+    prs_merged was 0 across all 140 backfilled hours and 3,883,472 rows.
+
+    Measured on 2026-09-12-06: 19,539 PullRequestEvents, action='merged' on
+    6,422 of them, and pull_request.merged None on ALL of them. The original
+    bool(pr.get("merged")) was therefore False every time. A metric stuck at
+    zero raises no error and loses no rows -- it just quietly isn't true, which
+    is why a full backfill never surfaced it.
+
+    Both archive shapes must count, since this data spans a decade.
+    """
+    print("\n[3] a merged PR is detected in both archive shapes")
+    check("action='merged' counts",
+          is_merged_pr("PullRequestEvent", {"action": "merged"}, {}) is True)
+    check("legacy closed+merged=true counts",
+          is_merged_pr("PullRequestEvent", {"action": "closed"}, {"merged": True}) is True)
+    check("closed without merge does not",
+          is_merged_pr("PullRequestEvent", {"action": "closed"}, {"merged": False}) is False)
+    check("opened does not",
+          is_merged_pr("PullRequestEvent", {"action": "opened"}, {}) is False)
+    check("the real shape that broke it: merged flag absent",
+          is_merged_pr("PullRequestEvent", {"action": "merged"}, {"merged": None}) is True)
+    check("a non-PR event is never a merge",
+          is_merged_pr("PushEvent", {"action": "merged"}, {}) is False)
+
+
 def test_hour_partition_sorts():
     """
     The storage key must order chronologically, which the archive's URL key
@@ -106,7 +134,7 @@ def test_hour_partition_sorts():
     affected -- the loads match with WHERE event_hour = ?, so idempotency held
     the whole time while ORDER BY quietly lied.
     """
-    print("\n[3] the storage key sorts chronologically")
+    print("\n[4] the storage key sorts chronologically")
     check("hour 9 is padded to '-09'",
           hour_partition(datetime(2026, 9, 7, 9, tzinfo=timezone.utc)) == "2026-09-07-09")
     check("hour 23 is unchanged",
@@ -135,7 +163,7 @@ def test_completeness(types_df):
     no PushEvent/CreateEvent/DeleteEvent and roughly half the events of a
     healthy neighbouring hour. Nothing else in the pipeline catches that.
     """
-    print("\n[4] partial hours are flagged")
+    print("\n[5] partial hours are flagged")
     warns = completeness_warnings(types_df)
     check("the known-partial hour raises a warning", len(warns) > 0,
           warns[0][:64] if warns else "none")
@@ -149,7 +177,7 @@ def test_completeness(types_df):
 
 def test_conservation(df, types_df, repos_df):
     """Aggregates must account for every usable event -- no silent drops."""
-    print("\n[5] aggregates conserve the input")
+    print("\n[6] aggregates conserve the input")
     total_in = len(df)
     check("event-type counts sum to input",
           int(types_df["events"].sum()) == total_in,
@@ -171,7 +199,7 @@ def test_idempotency(types_df, repos_df):
     Load the same hour three times; the table must look identical to loading
     it once. This is the property Airflow retries depend on.
     """
-    print("\n[6] loading the same hour repeatedly is idempotent")
+    print("\n[7] loading the same hour repeatedly is idempotent")
     db = os.path.join(HERE, "test_idempotency.db")
     if os.path.exists(db):
         os.remove(db)
@@ -224,7 +252,7 @@ def test_truncated_file_is_loud():
     refuse -- it is exactly the silent-partial-data problem completeness_
     warnings() was written for, one layer lower down.
     """
-    print("\n[7] a truncated file fails loudly")
+    print("\n[8] a truncated file fails loudly")
     import gzip as _gzip
     import tempfile
 
@@ -260,7 +288,7 @@ def test_truncated_file_is_loud():
 
 def test_missing_hour():
     """GH Archive really is missing 2016-10-21-18; that must be catchable."""
-    print("\n[8] a missing hour raises HourNotAvailable")
+    print("\n[9] a missing hour raises HourNotAvailable")
     try:
         download_hour(MISSING_HOUR, os.path.join(DATA_DIR, "_missing_probe"))
         check("404 raises HourNotAvailable", False, "no exception raised")
@@ -285,6 +313,7 @@ def main():
 
     test_dirty_data()
     test_hour_key_format()
+    test_merged_pr_detection()
     test_hour_partition_sorts()
     test_completeness(types_df)
     test_conservation(df, types_df, repos_df)
