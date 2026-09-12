@@ -31,10 +31,12 @@ from gharchive import (
     EVENT_TYPE_TABLE,
     REPO_ACTIVITY_TABLE,
     HourNotAvailable,
+    IncompleteDownload,
     download_hour,
     completeness_warnings,
     ensure_schema,
     hour_key,
+    hour_partition,
     is_usable,
     load_partition,
     read_hour_frame,
@@ -95,13 +97,45 @@ def test_hour_key_format():
           hour_key(datetime(2026, 1, 2, 0, tzinfo=timezone.utc)) == "2026-01-02-0")
 
 
+def test_hour_partition_sorts():
+    """
+    The storage key must order chronologically, which the archive's URL key
+    does not. This is the bug migration 001 fixes.
+
+    Caught only after 40 hours were already loaded, because equality was never
+    affected -- the loads match with WHERE event_hour = ?, so idempotency held
+    the whole time while ORDER BY quietly lied.
+    """
+    print("\n[3] the storage key sorts chronologically")
+    check("hour 9 is padded to '-09'",
+          hour_partition(datetime(2026, 9, 7, 9, tzinfo=timezone.utc)) == "2026-09-07-09")
+    check("hour 23 is unchanged",
+          hour_partition(datetime(2026, 9, 7, 23, tzinfo=timezone.utc)) == "2026-09-07-23")
+
+    day = [datetime(2026, 9, 7, h, tzinfo=timezone.utc) for h in range(24)]
+    padded = [hour_partition(d) for d in day]
+    check("a full day sorts into clock order", sorted(padded) == padded)
+
+    # The actual failure, stated as a test: on a complete day the unpadded max
+    # is hour 9, so a max(event_hour) watermark skips 14 hours of data.
+    unpadded = [hour_key(d) for d in day]
+    check("unpadded max really is hour 9, not 23",
+          max(unpadded) == "2026-09-07-9" and max(padded) == "2026-09-07-23",
+          f"unpadded max={max(unpadded)}, padded max={max(padded)}")
+
+    # The two formats must stay different things: the URL one must never pad,
+    # or the download 404s.
+    check("hour_key stays unpadded for the URL",
+          hour_key(datetime(2026, 9, 7, 9, tzinfo=timezone.utc)) == "2026-09-07-9")
+
+
 def test_completeness(types_df):
     """
     2026-09-05-10 is a real partial hour: valid file, zero parse errors, but
     no PushEvent/CreateEvent/DeleteEvent and roughly half the events of a
     healthy neighbouring hour. Nothing else in the pipeline catches that.
     """
-    print("\n[3] partial hours are flagged")
+    print("\n[4] partial hours are flagged")
     warns = completeness_warnings(types_df)
     check("the known-partial hour raises a warning", len(warns) > 0,
           warns[0][:64] if warns else "none")
@@ -115,7 +149,7 @@ def test_completeness(types_df):
 
 def test_conservation(df, types_df, repos_df):
     """Aggregates must account for every usable event -- no silent drops."""
-    print("\n[4] aggregates conserve the input")
+    print("\n[5] aggregates conserve the input")
     total_in = len(df)
     check("event-type counts sum to input",
           int(types_df["events"].sum()) == total_in,
@@ -137,7 +171,7 @@ def test_idempotency(types_df, repos_df):
     Load the same hour three times; the table must look identical to loading
     it once. This is the property Airflow retries depend on.
     """
-    print("\n[5] loading the same hour repeatedly is idempotent")
+    print("\n[6] loading the same hour repeatedly is idempotent")
     db = os.path.join(HERE, "test_idempotency.db")
     if os.path.exists(db):
         os.remove(db)
@@ -175,9 +209,58 @@ def test_idempotency(types_df, repos_df):
     os.remove(db)
 
 
+def test_truncated_file_is_loud():
+    """
+    A short download must fail, never yield a partial hour.
+
+    This wedged the real backfill: 2026-09-08-6 arrived 19,101 bytes short of
+    its declared 15,087,597, the read loop ended normally (a cut connection and
+    a clean finish both look like read() == b''), and os.replace() promoted the
+    truncated file. The size>0 cache check then served it to every retry, so
+    retrying could never win.
+
+    The property under test is that truncation is LOUD. Half an hour of events
+    that parses without complaint is the failure mode this pipeline exists to
+    refuse -- it is exactly the silent-partial-data problem completeness_
+    warnings() was written for, one layer lower down.
+    """
+    print("\n[7] a truncated file fails loudly")
+    import gzip as _gzip
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as td:
+        good = os.path.join(td, "good.json.gz")
+        with _gzip.open(good, "wb") as fh:
+            for i in range(500):
+                fh.write(b'{"type":"PushEvent","created_at":"2026-09-07T09:00:00Z",'
+                         b'"repo":{"name":"o/r"},"actor":{"login":"a"},"payload":{}}\n')
+
+        whole = open(good, "rb").read()
+        cut = os.path.join(td, "cut.json.gz")
+        with open(cut, "wb") as fh:                  # lop off the tail, as a short read does
+            fh.write(whole[: int(len(whole) * 0.6)])
+
+        df_ok, _ = read_hour_frame(good)
+        check("the intact file reads", len(df_ok) == 500, f"{len(df_ok)} rows")
+
+        try:
+            df_bad, _ = read_hour_frame(cut)
+        except EOFError:
+            check("the truncated file raises, not returns partial data", True)
+        except Exception as exc:
+            check("the truncated file raises, not returns partial data", False,
+                  f"raised {type(exc).__name__}, wanted EOFError")
+        else:
+            check("the truncated file raises, not returns partial data", False,
+                  f"silently returned {len(df_bad)} rows -- this is the dangerous case")
+
+    check("IncompleteDownload is distinct from HourNotAvailable",
+          not issubclass(IncompleteDownload, HourNotAvailable))
+
+
 def test_missing_hour():
     """GH Archive really is missing 2016-10-21-18; that must be catchable."""
-    print("\n[6] a missing hour raises HourNotAvailable")
+    print("\n[8] a missing hour raises HourNotAvailable")
     try:
         download_hour(MISSING_HOUR, os.path.join(DATA_DIR, "_missing_probe"))
         check("404 raises HourNotAvailable", False, "no exception raised")
@@ -202,9 +285,11 @@ def main():
 
     test_dirty_data()
     test_hour_key_format()
+    test_hour_partition_sorts()
     test_completeness(types_df)
     test_conservation(df, types_df, repos_df)
     test_idempotency(types_df, repos_df)
+    test_truncated_file_is_loud()
     test_missing_hour()
 
     failed = [n for n, ok in results if not ok]

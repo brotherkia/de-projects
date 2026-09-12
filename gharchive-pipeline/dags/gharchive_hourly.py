@@ -39,6 +39,7 @@ from gharchive import (  # noqa: E402
     ensure_schema,
     get_connection,
     hour_key,
+    hour_partition,
     load_partition,
     read_hour_frame,
     transform_event_types,
@@ -64,8 +65,23 @@ STAGING_DIR = os.path.join(DATA_DIR, "staging")
     max_active_runs=1,
     default_args={
         "owner": "parsa",
-        "retries": 2,
+        # Sized against a real failure, not a guess. On 2026-09-08 three hours
+        # (09-07-11, -19, -20) died in ssl.do_handshake() with
+        # SSL_UNEXPECTED_EOF_WHILE_READING -- the TLS interception this network
+        # does periodically, not a bug and not a missing hour. Each burned all
+        # three tries inside ~3 minutes and gave up, while hours scheduled 20
+        # minutes either side of them succeeded. So the interference comes in
+        # bursts of minutes, and a fixed 2-retry/2-minute policy is simply
+        # shorter than the outage it has to outlive.
+        #
+        # Exponential backoff from 2 min, capped at 15: 2, 4, 8, 15, 15 --
+        # about 44 minutes of retry window instead of 4, at the cost of one
+        # extra sleeping task slot. Downloads are idempotent (download_hour()
+        # reuses an existing non-empty file), so a retry is cheap.
+        "retries": 5,
         "retry_delay": pendulum.duration(minutes=2),
+        "retry_exponential_backoff": True,
+        "max_retry_delay": pendulum.duration(minutes=15),
     },
     tags=["gharchive", "hourly", "elt"],
 )
@@ -100,7 +116,9 @@ def gharchive_hourly():
     def aggregate(raw_path: str, data_interval_start=None) -> dict:
         """Parse the hour once, write both aggregates to staging as Parquet."""
         dt = data_interval_start.in_timezone("UTC")
-        event_hour = hour_key(datetime(dt.year, dt.month, dt.day, dt.hour, tzinfo=timezone.utc))
+        # hour_partition(), not hour_key(): the padded form is the storage key.
+        # hour_key() is the archive's URL naming and must not reach the tables.
+        event_hour = hour_partition(datetime(dt.year, dt.month, dt.day, dt.hour, tzinfo=timezone.utc))
 
         df, stats = read_hour_frame(raw_path)
         print(f"{event_hour}: {stats.total_lines:,} lines, {stats.usable:,} usable, "

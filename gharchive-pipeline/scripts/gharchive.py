@@ -31,6 +31,27 @@ EVENT_TYPE_TABLE = "gh_event_type_hourly"
 REPO_ACTIVITY_TABLE = "gh_repo_activity_hourly"
 
 
+class IncompleteDownload(Exception):
+    """
+    The response ended early: fewer bytes arrived than Content-Length promised.
+
+    Not hypothetical. On 2026-09-12 the backfill wedged on 2026-09-08-6, which
+    landed as 15,068,496 bytes against a declared 15,087,597 -- 19,101 bytes
+    short, 0.13%. gzip -t called it "unexpected end of file" and every
+    aggregate retry died on EOFError.
+
+    The read loop cannot tell a finished response from a connection cut
+    mid-stream: both surface as read() returning b''. So the loop exited
+    normally, os.replace() promoted a truncated file to its final name, and
+    the size>0 cache check then served that corpse to every retry. Retries
+    could never win, and max_active_runs=1 meant the whole backfill queued up
+    behind one 19 KB shortfall.
+
+    Hence this check before the rename: bytes written must equal the length
+    the server declared, or nothing is promoted.
+    """
+
+
 class HourNotAvailable(Exception):
     """
     GH Archive is missing this hour (HTTP 404).
@@ -62,13 +83,38 @@ class HourStats:
 
 def hour_key(dt: datetime) -> str:
     """
-    '2026-09-05-10' -- GH Archive's hour naming.
+    '2026-09-05-10' -- GH Archive's hour naming. FOR URLS AND RAW FILENAMES ONLY.
 
     The hour is NOT zero-padded: hour 3 is '...-3', not '...-03'. Padding it
     yields a URL that 404s while looking perfectly reasonable, which is an
     easy way to mistake your own bug for a hole in the archive.
+
+    Do NOT use this as a database key -- use hour_partition(). This format is
+    a property of someone else's URL scheme, and letting it become the storage
+    key is what broke sorting; see hour_partition() and migration 001.
     """
     return f"{dt.year:04d}-{dt.month:02d}-{dt.day:02d}-{dt.hour}"
+
+
+def hour_partition(dt: datetime) -> str:
+    """
+    '2026-09-05-09' -- the STORAGE key. Same shape, but zero-padded so it sorts.
+
+    Identical to hour_key() except for the one character that matters. TEXT
+    compares lexicographically, so with the archive's unpadded hour the rows
+    came back 0, 1, 10, 11, ... 19, 2, 20 -- and on a complete day the
+    lexicographic max of hours 0..23 is '9', not '23'. A max(event_hour)
+    watermark therefore reported 09:00 as the newest hour of a full day.
+
+    Padded, the string orders chronologically, so ORDER BY, BETWEEN and every
+    window function are correct without a type change -- which is required
+    here, because these functions run against SQLite in the tests and Postgres
+    in the containers and must behave identically on both.
+
+    Equality was never wrong, which is why this hid for 40+ loaded hours: the
+    loads match with WHERE event_hour = ?, so idempotency always held.
+    """
+    return f"{dt.year:04d}-{dt.month:02d}-{dt.day:02d}-{dt.hour:02d}"
 
 
 def hour_url(dt: datetime) -> str:
@@ -91,15 +137,35 @@ def download_hour(dt: datetime, dest_dir: str, timeout: int = 300) -> str:
     req = Request(hour_url(dt), headers={"User-Agent": USER_AGENT})
     try:
         with urlopen(req, timeout=timeout) as resp:
+            # What the server promised. Absent only if the response is chunked,
+            # in which case there is nothing to compare against and we accept
+            # whatever arrives.
+            declared = resp.headers.get("Content-Length")
+            declared = int(declared) if declared is not None else None
+
             tmp = path + ".partial"
+            written = 0
             with open(tmp, "wb") as f:
                 while True:
                     chunk = resp.read(1 << 20)  # 1 MiB at a time; never load 73 MB into RAM
                     if not chunk:
                         break
+                    written += len(chunk)
                     f.write(chunk)
-            # Rename only once the download finished, so an interrupted run can
-            # never leave a truncated file that later looks complete and cached.
+
+            # A cut connection and a finished response both end the loop above
+            # with read() == b'', so "the loop finished" proves nothing. Only
+            # the byte count does. Check BEFORE the rename: a short file that
+            # reaches `path` is cached forever by the size>0 test at the top of
+            # this function, and no retry can dislodge it.
+            if declared is not None and written != declared:
+                os.unlink(tmp)
+                raise IncompleteDownload(
+                    f"{hour_url(dt)}: got {written:,} bytes, expected {declared:,} "
+                    f"({declared - written:,} short) -- not promoting to {path}"
+                )
+
+            # Promote only a verified-complete file.
             os.replace(tmp, path)
     except HTTPError as exc:
         if exc.code == 404:
@@ -389,7 +455,7 @@ def load_partition(conn, df: pd.DataFrame, table: str, event_hour: str) -> int:
 
 def run_hour(dt: datetime, data_dir: str, conn=None, top_n: int = None) -> dict:
     """Fetch -> validate -> transform -> load a single hour. Returns a run summary."""
-    event_hour = hour_key(dt)
+    event_hour = hour_partition(dt)
     own_conn = conn is None
     conn = conn or get_connection()
     try:
