@@ -22,6 +22,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from collections import defaultdict
 
 import pandas as pd
@@ -162,12 +163,108 @@ def consume_hour(event_hour: str, group: str, idle_timeout: float = 15.0) -> tup
     return df, consumed, other_hour
 
 
+def consume_follow(group: str, throttle: float = 0.0, report_every: float = 3.0,
+                   idle_stop: float = 20.0) -> None:
+    """
+    Join a real consumer group and commit offsets, so CONSUMER LAG exists.
+
+    The replay path above deliberately has no lag to show: it assign()s
+    partitions and never commits, because a reconciliation run that depended on
+    where a previous run stopped would prove nothing. The cost of that choice is
+    that the broker has no idea the consumer exists -- no group, no committed
+    offsets, and therefore no lag.
+
+    Lag is the number a streaming engineer actually watches: how many messages
+    have been produced that this group has not yet processed. It is the
+    difference between the partition's high-water mark and the group's committed
+    offset, and it is the first thing to look at when a pipeline "feels slow".
+
+    subscribe() (not assign()) is what joins the group and makes the broker
+    track it. --throttle deliberately slows consumption so the lag climbs while
+    a producer runs and visibly drains afterwards; watching it recover is the
+    whole point of the exercise.
+    """
+    consumer = Consumer({
+        "bootstrap.servers": BOOTSTRAP,
+        "group.id": group,
+        "auto.offset.reset": "earliest",
+        # Commit explicitly after processing, never on a timer. Auto-commit can
+        # acknowledge a message the consumer then crashes before handling,
+        # which silently loses it -- the streaming version of a lost partition.
+        "enable.auto.commit": False,
+    })
+    consumer.subscribe([TOPIC])
+
+    processed = 0
+    started = time.time()
+    last_report = time.time()
+    last_message = time.time()
+    print(f"group={group!r} subscribed to {TOPIC}"
+          + (f", throttled to ~{1/throttle:,.0f} msg/s" if throttle else "")
+          + f"\nwatch it at http://localhost:8082 -> Consumers -> {group}\n")
+    try:
+        while True:
+            msg = consumer.poll(1.0)
+            now = time.time()
+            if msg is None:
+                if now - last_message > idle_stop:
+                    print(f"\nidle {idle_stop:.0f}s -- caught up and nothing new. stopping.")
+                    return
+            elif msg.error():
+                print(f"consumer error: {msg.error()}", file=sys.stderr)
+            else:
+                json.loads(msg.value())   # the work a real consumer would do
+                processed += 1
+                last_message = now
+                consumer.commit(msg, asynchronous=True)
+                if throttle:
+                    time.sleep(throttle)
+
+            if now - last_report >= report_every:
+                # Both of these are LOCAL lookups, and that matters. The first
+                # version of this block called get_watermark_offsets(cached=False)
+                # and committed() -- twelve blocking round trips every three
+                # seconds on six partitions -- and measured throughput collapsing
+                # from 134 messages per tick to 1. The monitoring was eating the
+                # poll loop it was monitoring.
+                #
+                # cached=True reads the high-water mark the broker already
+                # piggybacks on every fetch response, and position() is the
+                # client's own next-fetch offset. Same number, no network.
+                parts = consumer.assignment()
+                total_lag = 0
+                for tp in consumer.position(parts):
+                    lo, hi = consumer.get_watermark_offsets(tp, cached=True)
+                    pos = tp.offset if tp.offset is not None and tp.offset >= 0 else lo
+                    if hi is not None:
+                        total_lag += max(0, hi - pos)
+                rate = processed / max(1e-9, now - started)
+                print(f"  processed {processed:>7,}   lag {total_lag:>7,}   "
+                      f"{rate:>6,.0f} msg/s   partitions {len(parts)}")
+                last_report = now
+    except KeyboardInterrupt:
+        print("\ninterrupted -- offsets are committed, so restarting resumes here.")
+    finally:
+        consumer.close()
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("hour", help="e.g. 2026-09-12-06 (padded storage key)")
+    ap.add_argument("hour", nargs="?", help="e.g. 2026-09-12-06 (padded storage key)")
     ap.add_argument("--group", default=None, help="consumer group; default is a fresh one per run")
+    ap.add_argument("--mode", choices=["replay", "follow"], default="replay",
+                    help="replay: assign() from offset 0 and aggregate (for reconciliation). "
+                         "follow: subscribe() with a real group and commit, so lag is visible.")
+    ap.add_argument("--throttle", type=float, default=0.0,
+                    help="follow mode: seconds to sleep per message, to make lag build up")
     args = ap.parse_args()
 
+    if args.mode == "follow":
+        consume_follow(args.group or "gh-live", throttle=args.throttle)
+        return 0
+
+    if not args.hour:
+        ap.error("replay mode needs an hour, e.g. 2026-09-12-06")
     event_hour = args.hour
     group = args.group or f"gh-reconcile-{os.getpid()}"
 

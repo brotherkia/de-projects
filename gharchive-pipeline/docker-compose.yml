@@ -186,9 +186,61 @@ services:
       retries: 12
       start_period: 30s
 
+  # Kafka's missing web UI. The broker ships no interface of its own -- the
+  # CLI in the kafka container is the only other way to see a topic -- so this
+  # is here to make partitions, offsets, consumer lag and message payloads
+  # visible while reasoning about the streaming path.
+  #
+  # Read-only by design: DYNAMIC_CONFIG_ENABLED is left off, so the UI cannot
+  # create or delete topics. Inspecting a pipeline should not be able to
+  # reshape it by accident.
+  kafka-ui:
+    image: kafbat/kafka-ui:latest
+    environment:
+      KAFKA_CLUSTERS_0_NAME: gharchive-local
+      # kafka:9092 is the in-network listener; localhost:29092 is the host one
+      # and would resolve to this container, not the broker.
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      DYNAMIC_CONFIG_ENABLED: "false"
+      AUTH_TYPE: DISABLED
+    ports:
+      - "${KAFKA_UI_PORT:-8082}:8080"
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  # A window onto analytics-db. The pipeline writes 9.7M events and there was
+  # no way to look at them without psql, which is fine for one query and
+  # useless for exploring.
+  #
+  # The server connection is pre-registered from pgadmin/servers.json, so the
+  # analytics database is already in the tree on first login -- no host, port
+  # or password to type. Note Host there is "analytics-db", the compose service
+  # name: pgAdmin runs INSIDE the network, so localhost:5433 (which is how you
+  # reach it from your laptop) would point at the pgAdmin container itself.
+  # That mix-up is the usual reason a containerised DB client "can't connect".
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@example.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+      # Local-only tool; skip the master-password prompt on every login.
+      PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: "False"
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+    volumes:
+      - ./pgadmin/servers.json:/pgadmin4/servers.json:ro
+      - ./pgadmin/pgpass:/pgadmin4/pgpass:ro
+      - pgadmin-data:/var/lib/pgadmin
+    ports:
+      - "${PGADMIN_PORT:-8083}:80"
+    depends_on:
+      analytics-db:
+        condition: service_healthy
+
 volumes:
   airflow-db-data:
   analytics-db-data:
   airflow-logs:
   gh-data:
   kafka-data:
+  pgadmin-data:

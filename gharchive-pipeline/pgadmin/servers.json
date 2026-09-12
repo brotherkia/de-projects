@@ -1,0 +1,14 @@
+{
+  "Servers": {
+    "1": {
+      "Name": "analytics (this pipeline)",
+      "Group": "gharchive",
+      "Host": "analytics-db",
+      "Port": 5432,
+      "MaintenanceDB": "analytics",
+      "Username": "analytics",
+      "SSLMode": "prefer",
+      "Comment": "The three tables this pipeline writes. Host is the compose service name, not localhost -- pgAdmin runs inside the network."
+    }
+  }
+}
