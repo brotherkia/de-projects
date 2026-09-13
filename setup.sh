@@ -75,13 +75,16 @@ if "$ROOT/.venv/bin/python" test_gharchive.py; then
   cd "$ROOT"
   say "Ready."
   cat <<'EOF'
-The pipeline logic is verified on this machine. To bring up Airflow:
+The pipeline logic is verified on this machine. To bring up the stack:
 
   cd gharchive-pipeline
   docker compose up -d
   docker compose ps           # wait for apiserver to report healthy
 
-  # UI: http://localhost:8080   (admin / admin)
+  # Airflow   http://localhost:8080   (admin / admin)
+  # Kafka UI  http://localhost:8082
+  # pgAdmin   http://localhost:8083
+  # Those are compose defaults; set AIRFLOW_PORT etc. in .env if one is taken.
 
 Run one hour end to end and watch it happen:
 

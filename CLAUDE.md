@@ -62,19 +62,31 @@ This is deliberate: it means the ETL logic is provable with
 always a scheduling problem and never a "does the maths work" problem. Keep new
 logic on the `scripts/` side of that line.
 
+The Kafka scripts (`gh_producer.py`, `gh_consumer.py`, `test_reconcile.py`)
+also live in `scripts/`, but they are run by hand from the host venv — nothing
+in Airflow calls them yet.
+
 ## Running things
 
 ```bash
-./setup.sh                                    # fresh machine: venv + deps + 19 checks
-cd gharchive-pipeline/scripts && python3 test_gharchive.py   # logic only, no Docker
-cd gharchive-pipeline && docker compose up -d                # Airflow 3.3.1
+./setup.sh                                    # fresh machine: venv + deps + .env + standalone checks
+.venv/bin/python gharchive-pipeline/scripts/test_gharchive.py   # logic only, no Docker
+cd gharchive-pipeline && docker compose up -d                # Airflow, Kafka, Kafka UI, pgAdmin
 ```
 
-Use `.venv/bin/python`, not the system `python3` — pandas is only in the venv.
+Use `.venv/bin/python`, not the system `python3` — pandas, confluent-kafka and
+psycopg2 are only in the venv.
+
+The Kafka replay/reconcile invocation is in `gharchive-pipeline/README.md`.
+Two traps: without `PIPELINE_DB_HOST` set, `get_connection()` silently writes
+to a local SQLite file instead of Postgres; and replaying the same hour into one
+topic twice double-counts it, so each replay gets a fresh topic via `GH_TOPIC`.
 
 Host ports come from `.env` (gitignored, see `.env.example`); compose defaults
-to 8080/5432. On Parsa's main machine 8080 is taken by an unrelated
-`cute-site` container, so `.env` there sets 8081/5433. Don't hardcode either.
+to 8080 (Airflow), 5432 (analytics-db), 8082 (Kafka UI), 8083 (pgAdmin) and
+29092 (broker). On Parsa's main machine 8080 is taken by an unrelated
+`cute-site` container and 5432 by `online-exam-db-1`, so `.env` there sets
+8081/5433. Don't hardcode any of them.
 
 `.env` also carries the Airflow secrets (`AIRFLOW__CORE__FERNET_KEY`,
 `AIRFLOW__API_AUTH__JWT_SECRET`). Compose refuses to start without them, and
@@ -83,9 +95,11 @@ is public, and its history was rewritten once already to remove a pair.
 
 ## Git
 
-Remote is **hamgit.ir** (`kiaee7`), credentials already stored. GitHub is
-reachable but the SSH key at `~/.ssh/id_ed25519.pub` is not registered on the
-account, so GitHub pushes fail until it is.
+Remote `origin` is **GitHub**, `brotherkia/de-projects` (public), over HTTPS.
+`~/.local/bin/gh` is git's credential helper for github.com; there is no SSH
+key. hamgit.ir (`kiaee7`) still holds this repo's old, secret-bearing history
+and still hosts `cute-site` and `online-exam` — keep `~/.git-credentials`.
+See `HANDOFF.md` for the history rewrite and the TLS-interception warning.
 
 Commit messages here explain *why*, and state what was verified versus what
 was only written. Match that.

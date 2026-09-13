@@ -12,3 +12,9 @@ pandas
 # Only needed if you run the DAG's staging step outside Docker; the tests don't
 # require it.
 pyarrow
+
+# The Kafka path (gh_producer.py, gh_consumer.py, test_reconcile.py) runs from
+# the host venv, not inside Airflow, so the Airflow image shipping psycopg2
+# does not help it. The standalone tests need neither: they load into SQLite.
+confluent-kafka
+psycopg2-binary

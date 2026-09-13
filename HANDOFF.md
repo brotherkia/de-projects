@@ -8,7 +8,7 @@ Context for picking this repo up in a new session, on any machine.
 git clone https://github.com/brotherkia/de-projects.git DE && cd DE && ./setup.sh
 ```
 
-`setup.sh` checks prerequisites, builds `.venv`, and runs the 19-check test
+`setup.sh` checks prerequisites, builds `.venv`, and runs the standalone test
 suite so you know the logic works there before Docker is involved. Then see
 `gharchive-pipeline/README.md` to bring up Airflow.
 
@@ -48,9 +48,18 @@ this work; it doesn't have the volume to make a pipeline meaningful.
 - On *this* machine host ports **8080 and 5432 are both taken** — 5432 by
   `online-exam-db-1` — so `.env` here sets `AIRFLOW_PORT=8081` and
   `ANALYTICS_DB_PORT=5433`, putting the UI on **localhost:8081**. Compose
-  defaults to 8080/5432, which will fail to bind here. `.env` is gitignored
-  because that is a fact about one machine — and because it also holds the
-  two Airflow secrets.
+  defaults to 8080/5432, which will fail to bind here. The other three stay on
+  their defaults: Kafka UI **8082**, pgAdmin **8083**, broker **29092**. `.env`
+  is gitignored because that is a fact about one machine — and because it also
+  holds the two Airflow secrets.
+- **The Kafka scripts run from the host venv and need `PIPELINE_DB_*` set**
+  (`PIPELINE_DB_PORT=5433` here). Without `PIPELINE_DB_HOST`, `get_connection()`
+  silently uses a local SQLite file instead of Postgres. The full invocation is
+  in the pipeline README.
+- **Stop `gh_consumer.py --mode follow` with Ctrl+C, not `timeout`.** SIGTERM
+  isn't caught, so the killed member lingers in the group for its 45 s session
+  timeout and blocks the next run's rebalance. That cost one confusing
+  "partitions 0" result before the broker log explained it.
 - Local Python is 3.14, so old pinned wheels (e.g. pandas 2.1.4) won't install.
   The venv at `.venv/` has pandas 3.0.5 — the same version Airflow 3.3.1 pins.
   **If `python3 -m venv` is interrupted it leaves a venv with no `pip` and an
@@ -68,19 +77,33 @@ this work; it doesn't have the volume to make a pipeline meaningful.
 
 ## Current project: `gharchive-pipeline/`
 
-Airflow 3.3.1 hourly ETL over GH Archive. See its README for detail.
+Airflow 3.3.1 hourly ETL over GH Archive, plus a Kafka replay path that
+reconciles against it. See its README for detail.
 
 **Verified, actually run:** `docker compose up -d` with all services healthy;
 a continuous **140-hour backfill** (2026-09-06-12 → 2026-09-12-07) of **142 runs,
 0 failed**, loading **9,771,985 events** and 3,883,472 repo-hour rows over
-1,730,954 distinct repos; 4.8 GB of raw archive on disk; **27/27** standalone
-logic checks; and `migrations/001_pad_event_hour.sql` applied and verified.
+1,730,954 distinct repos; 4.8 GB of raw archive on disk; **33/33** standalone
+logic checks (last run 2026-09-13); and `migrations/001_pad_event_hour.sql`
+applied and verified.
 
-**Not yet done:** no streaming layer — Kafka reconciliation is the next build.
-Raw files still sit in a Docker volume rather than MinIO. **There is no Spark in
-this project** and none is planned; if a resume ever says otherwise, it is wrong.
+On the streaming side: a single-broker KRaft Kafka, with **batch and streaming
+reconciling exactly on 2026-09-12-06** — 68,681 events, 29,093 repos,
+**15/15** checks. Consumer lag was made visible with a throttled follow-mode
+consumer, and Kafka UI (8082) and pgAdmin (8083) were brought up for inspecting
+the stream and the tables.
 
-**Two bugs found and fixed during that backfill**, both documented in the
+**Known wrong right now:** `prs_merged` is 0 in every backfilled hour except
+2026-09-12-06. The bug is fixed and that hour was reloaded (0 → 6,422, matching
+the raw `action='merged'` count), but the rest of the backfill has not been
+re-run.
+
+**Not yet done:** re-running the backfill to correct `prs_merged`. The Kafka path
+is run by hand from the venv, not from Airflow. Raw files still sit in a Docker
+volume rather than MinIO. **There is no Spark in this project** and none is
+planned; if a resume ever says otherwise, it is wrong.
+
+**Three bugs found and fixed around that backfill**, all documented in the
 pipeline README:
 
 - a silently truncated download (19,101 bytes short of `content-length`) that
@@ -90,6 +113,12 @@ pipeline README:
   `0,1,10,...,19,2,20`, making `max(event_hour)` report hour 9 as the latest
   hour of a complete day. Equality was unaffected, so idempotency held and the
   bug hid for 40+ hours.
+- `prs_merged` pinned at 0 across all 3,883,472 rows. In this data a merge is
+  `action='merged'` with `pull_request.merged` None (measured on 2026-09-12-06),
+  and the code only looked at `pull_request.merged`.
+  The batch-vs-streaming reconciliation passed 15/15 *while it was wrong*: both
+  paths share the field extraction, so they agreed on the wrong answer. Found by
+  hand, not by any check.
 
 ## History worth knowing
 
@@ -111,9 +140,10 @@ Two earlier starter projects were deleted at commit `cb99250` and remain in
 history at `e767346`:
 
 - `exam-analytics-pipeline/` — Airflow + Kafka over Uniquizitor data. Ran only
-  on synthetic data. Its **batch-vs-streaming reconciliation test** is the idea
-  worth carrying forward: it replayed every attempt as an event and proved the
-  streaming aggregates matched the batch aggregates exactly.
+  on synthetic data. Its **batch-vs-streaming reconciliation test** was the idea
+  worth carrying forward — it replayed every attempt as an event and proved the
+  streaming aggregates matched the batch aggregates exactly — and it now lives
+  on as `gharchive-pipeline/scripts/test_reconcile.py`, against real data.
 - `book-scraper/` — dead on arrival, target site unreachable from this network.
 
 ## How to keep working on this
